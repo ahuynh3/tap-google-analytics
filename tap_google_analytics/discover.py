@@ -554,9 +554,17 @@ def generate_catalog(
     catalog_entries = []
 
     for report in report_config:
+        selected_by_default = {*report['metrics'][:10], 
+                               *report.get('dimensions', [])}
         schema, mdata = generate_catalog_entry(
             client, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids
         )
+
+        mdata = reduce(lambda mdata, field_name: metadata.write(mdata,
+                                                                ("properties", field_name),
+                                                                "selected-by-default", True),
+                       selected_by_default,
+                       mdata)
 
         catalog_entries.append(
             CatalogEntry(
