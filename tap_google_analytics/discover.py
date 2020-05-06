@@ -1,46 +1,52 @@
+import json
 import re
+import sys
 from functools import reduce
-import singer
-from singer import metadata, Schema, CatalogEntry, Catalog
+from pathlib import Path
 
-from tap_google_analytics.reports import PREMADE_REPORTS
+import singer
+from singer import Catalog, CatalogEntry, Schema, metadata
+
 
 LOGGER = singer.get_logger()
 
-integer_field_overrides = {'ga:cohortNthDay',
-                           'ga:cohortNthMonth',
-                           'ga:cohortNthWeek',
-                           'ga:daysSinceLastSession',
-                           'ga:daysToTransaction',
-                           'ga:nthDay',
-                           'ga:nthHour',
-                           'ga:nthMinute',
-                           'ga:nthMonth',
-                           'ga:nthWeek',
-                           'ga:pageDepth',
-                           'ga:screenDepth',
-                           'ga:sessionCount',
-                           'ga:sessionsToTransaction',
-                           'ga:subContinentCode',
-                           'ga:visitCount',
-                           'ga:visitLength',
-                           'ga:visitsToTransaction'}
+integer_field_overrides = {
+    'ga:cohortNthDay',
+    'ga:cohortNthMonth',
+    'ga:cohortNthWeek',
+    'ga:daysSinceLastSession',
+    'ga:daysToTransaction',
+    'ga:nthDay',
+    'ga:nthHour',
+    'ga:nthMinute',
+    'ga:nthMonth',
+    'ga:nthWeek',
+    'ga:pageDepth',
+    'ga:screenDepth',
+    'ga:sessionCount',
+    'ga:sessionsToTransaction',
+    'ga:subContinentCode',
+    'ga:visitCount',
+    'ga:visitLength',
+    'ga:visitsToTransaction',
+}
 
-datetime_field_overrides = {'ga:date',
-                            'ga:dateHour'}
+datetime_field_overrides = {'ga:date', 'ga:dateHour'}
 
-float_field_overrides = {'ga:latitude',
-                         'ga:longitude',
-                         'ga:avgScreenviewDuration',
-                         'ga:avgSearchDuration',
-                         'ga:avgSessionDuration',
-                         'ga:avgTimeOnPage',
-                         'ga:cohortSessionDurationPerUser',
-                         'ga:cohortSessionDurationPerUserWithLifetimeCriteria',
-                         'ga:searchDuration',
-                         'ga:sessionDuration',
-                         'ga:timeOnPage',
-                         'ga:timeOnScreen'}
+float_field_overrides = {
+    'ga:latitude',
+    'ga:longitude',
+    'ga:avgScreenviewDuration',
+    'ga:avgSearchDuration',
+    'ga:avgSessionDuration',
+    'ga:avgTimeOnPage',
+    'ga:cohortSessionDurationPerUser',
+    'ga:cohortSessionDurationPerUserWithLifetimeCriteria',
+    'ga:searchDuration',
+    'ga:sessionDuration',
+    'ga:timeOnPage',
+    'ga:timeOnScreen',
+}
 
 # pylint: disable=too-many-return-statements
 def type_to_schema(ga_type, field_id):
@@ -62,6 +68,7 @@ def type_to_schema(ga_type, field_id):
     else:
         raise Exception("Unknown Google Analytics type: {}".format(ga_type))
 
+
 def sort_schemas(sub_schemas):
     schemas = [None, None, None, None]
     for sub_schema in sub_schemas:
@@ -74,14 +81,20 @@ def sort_schemas(sub_schemas):
         elif "string" in sub_schema["type"]:
             schemas[3] = sub_schema
         else:
-            raise Exception("Error sorting schemas, could not find slot for sub_schema: {}".format(sub_schema))
+            raise Exception(
+                "Error sorting schemas, could not find slot for sub_schema: {}".format(
+                    sub_schema
+                )
+            )
     return [s for s in schemas if s is not None]
+
 
 def types_to_schema(ga_types, field_id):
     sub_schemas = [type_to_schema(t, field_id) for t in set(ga_types)]
     if len(sub_schemas) == 1:
         return sub_schemas[0]
     return {"anyOf": sort_schemas(sub_schemas)}
+
 
 def is_static_XX_field(field_id, cubes_lookup):
     """
@@ -96,9 +109,12 @@ def is_static_XX_field(field_id, cubes_lookup):
     If the cubes_lookup map does NOT have the `XX` version in it, this
     function assumes that it has only the numeric versions.
     """
-    return ('XX' in field_id
-            and field_id not in cubes_lookup
-            and field_id not in ["ga:metricXX", "ga:dimensionXX"])
+    return (
+        'XX' in field_id
+        and field_id not in cubes_lookup
+        and field_id not in ["ga:metricXX", "ga:dimensionXX"]
+    )
+
 
 def is_dynamic_XX_field(field_id, cubes_lookup):
     """
@@ -113,9 +129,12 @@ def is_dynamic_XX_field(field_id, cubes_lookup):
     If the cubes_lookup map DOES have the `XX` version in it, this
     function assumes that the field is dynamically discovered.
     """
-    return ('XX' in field_id
-            and field_id in cubes_lookup
-            and field_id not in ["ga:metricXX", "ga:dimensionXX"])
+    return (
+        'XX' in field_id
+        and field_id in cubes_lookup
+        and field_id not in ["ga:metricXX", "ga:dimensionXX"]
+    )
+
 
 def handle_static_XX_field(field, cubes_lookup):
     """
@@ -128,24 +147,31 @@ def handle_static_XX_field(field, cubes_lookup):
     - Sub Metadata {"numeric_field_id>": {...cubes metadata value}, ...}
     """
     regex_matcher = field['id'].replace("XX", r'\d\d?')
-    matching_cubes = {field_id: cubes_lookup[field_id]
-                      for field_id in cubes_lookup.keys()
-                      if re.match(regex_matcher, field_id)}
+    matching_cubes = {
+        field_id: cubes_lookup[field_id]
+        for field_id in cubes_lookup.keys()
+        if re.match(regex_matcher, field_id)
+    }
 
-    sub_schemas = {field_id: type_to_schema(field["dataType"], field["id"])
-                   for field_id in matching_cubes.keys()}
+    sub_schemas = {
+        field_id: type_to_schema(field["dataType"], field["id"])
+        for field_id in matching_cubes.keys()
+    }
     sub_metadata = matching_cubes
 
     return sub_schemas, sub_metadata
 
 
-goal_related_field_ids = ['ga:goalXXStarts',
-                          'ga:goalXXCompletions',
-                          'ga:goalXXValue',
-                          'ga:goalXXConversionRate',
-                          'ga:goalXXAbandons',
-                          'ga:goalXXAbandonRate',
-                          'ga:searchGoalXXConversionRate']
+goal_related_field_ids = [
+    'ga:goalXXStarts',
+    'ga:goalXXCompletions',
+    'ga:goalXXValue',
+    'ga:goalXXConversionRate',
+    'ga:goalXXAbandons',
+    'ga:goalXXAbandonRate',
+    'ga:searchGoalXXConversionRate',
+]
+
 
 def get_dynamic_fields_named(client, field, profile_id):
     """
@@ -153,13 +179,14 @@ def get_dynamic_fields_named(client, field, profile_id):
     on a case-by-case basis (e.g., goals)
     """
     if field['id'] in goal_related_field_ids:
-        return [{**field,
-                 "id": field['id'].replace('XX', str(i)),
-                 "profiles": [profile_id]}
-                for i in client.get_goals_for_profile(profile_id)]
+        return [
+            {**field, "id": field['id'].replace('XX', str(i)), "profiles": [profile_id]}
+            for i in client.get_goals_for_profile(profile_id)
+        ]
     else:
         # Skip unknown, or already handled, dynamic fields
         return []
+
 
 def handle_dynamic_XX_field(client, field, cubes_lookup, profile_ids):
     """
@@ -175,59 +202,111 @@ def handle_dynamic_XX_field(client, field, cubes_lookup, profile_ids):
     # Do the logic of all profiles
     dynamic_field_names_per_profile = {}
     for profile_id in profile_ids:
-        dynamic_field_names_per_profile[profile_id] = get_dynamic_fields_named(client, field, profile_id)
+        dynamic_field_names_per_profile[profile_id] = get_dynamic_fields_named(
+            client, field, profile_id
+        )
 
     dynamic_superfields = get_custom_fields_supertypes(dynamic_field_names_per_profile)
 
-    sub_schemas = {d['id']: types_to_schema(d["dataTypes"], field["id"])
-                   for d in dynamic_superfields}
+    sub_schemas = {
+        d['id']: types_to_schema(d["dataTypes"], field["id"])
+        for d in dynamic_superfields
+    }
 
-    sub_metadata = {r['id']: cubes_lookup[field['id']]
-                    for r in dynamic_superfields}
+    sub_metadata = {r['id']: cubes_lookup[field['id']] for r in dynamic_superfields}
 
-    dynamic_fields_support = calculate_custom_fields_support(dynamic_field_names_per_profile)
+    dynamic_fields_support = calculate_custom_fields_support(
+        dynamic_field_names_per_profile
+    )
 
     return sub_schemas, sub_metadata, dynamic_fields_support
+
 
 def write_metadata(mdata, field, cubes, custom_fields_support=None):
     """ Translate a field_info object and its cubes into its metadata, and write it. """
     unsupported_profiles = (custom_fields_support or {}).get(field['id'])
     if custom_fields_support is None or not unsupported_profiles:
-        mdata = metadata.write(mdata, ("properties", field["id"]), "inclusion", "available")
+        mdata = metadata.write(
+            mdata, ("properties", field["id"]), "inclusion", "available"
+        )
     else:
-        mdata = metadata.write(mdata, ("properties", field["id"]), "inclusion", "unsupported")
-        mdata = metadata.write(mdata,
-                               ("properties", field["id"]),
-                               "unsupported-description",
-                               "This field cannot be selected because it is not defined in profile(s): {}".format(
-                                   ', '.join(unsupported_profiles)))
-    mdata = metadata.write(mdata, ("properties", field["id"]), "tap_google_analytics.cubes", list(cubes))
-    mdata = metadata.write(mdata, ("properties", field["id"]), "behavior", field["type"])
-    mdata = metadata.write(mdata, ("properties", field["id"]), "tap_google_analytics.group", field["group"])
+        mdata = metadata.write(
+            mdata, ("properties", field["id"]), "inclusion", "unsupported"
+        )
+        mdata = metadata.write(
+            mdata,
+            ("properties", field["id"]),
+            "unsupported-description",
+            "This field cannot be selected because it is not defined in profile(s): {}".format(
+                ', '.join(unsupported_profiles)
+            ),
+        )
+    mdata = metadata.write(
+        mdata, ("properties", field["id"]), "tap_google_analytics.cubes", list(cubes)
+    )
+    mdata = metadata.write(
+        mdata, ("properties", field["id"]), "behavior", field["type"]
+    )
+    mdata = metadata.write(
+        mdata, ("properties", field["id"]), "tap_google_analytics.group", field["group"]
+    )
 
     return mdata
+
 
 def generate_base_schema():
-    return {"type": "object", "properties": {"_sdc_record_hash": {"type": "string"},
-                                             "start_date": {"type": "string",
-                                                            "format": "date-time"},
-                                             "end_date": {"type": "string",
-                                                          "format": "date-time"},
-                                             "account_id": {"type": "string"},
-                                             "web_property_id": {"type": "string"},
-                                             "profile_id": {"type": "string"}}}
+    return {
+        "type": "object",
+        "properties": {
+            "_sdc_record_hash": {"type": "string"},
+            "start_date": {"type": "string", "format": "date-time"},
+            "end_date": {"type": "string", "format": "date-time"},
+            "account_id": {"type": "string"},
+            "web_property_id": {"type": "string"},
+            "profile_id": {"type": "string"},
+        },
+    }
+
 
 def generate_base_metadata(all_cubes, schema):
-    mdata = metadata.get_standard_metadata(schema=schema, key_properties=["_sdc_record_hash"])
+    mdata = metadata.get_standard_metadata(
+        schema=schema, key_properties=["_sdc_record_hash"]
+    )
     mdata = metadata.to_map(mdata)
     mdata = metadata.write(mdata, (), "tap_google_analytics.all_cubes", list(all_cubes))
-    mdata = reduce(lambda mdata, field_name: metadata.write(mdata, ("properties", field_name), "inclusion", "automatic"),
-                   ["_sdc_record_hash", "start_date", "end_date", "account_id", "web_property_id", "profile_id"],
-                   mdata)
-    mdata = reduce(lambda mdata, field_name: metadata.write(mdata, ("properties", field_name), "tap_google_analytics.group", "Report Fields"),
-                   ["_sdc_record_hash", "start_date", "end_date", "account_id", "web_property_id", "profile_id"],
-                   mdata)
+    mdata = reduce(
+        lambda mdata, field_name: metadata.write(
+            mdata, ("properties", field_name), "inclusion", "automatic"
+        ),
+        [
+            "_sdc_record_hash",
+            "start_date",
+            "end_date",
+            "account_id",
+            "web_property_id",
+            "profile_id",
+        ],
+        mdata,
+    )
+    mdata = reduce(
+        lambda mdata, field_name: metadata.write(
+            mdata,
+            ("properties", field_name),
+            "tap_google_analytics.group",
+            "Report Fields",
+        ),
+        [
+            "_sdc_record_hash",
+            "start_date",
+            "end_date",
+            "account_id",
+            "web_property_id",
+            "profile_id",
+        ],
+        mdata,
+    )
     return mdata
+
 
 def calculate_custom_fields_support(custom_fields):
     """
@@ -238,10 +317,12 @@ def calculate_custom_fields_support(custom_fields):
     custom_fields_sets = {}
     for fields in custom_fields.values():
         for field in fields:
-            custom_fields_sets[field['id']] = (custom_fields_sets.get(field['id'], all_profiles) -
-                                               set(field['profiles']))
+            custom_fields_sets[field['id']] = custom_fields_sets.get(
+                field['id'], all_profiles
+            ) - set(field['profiles'])
 
     return custom_fields_sets
+
 
 def get_custom_fields_supertypes(custom_fields):
     """
@@ -257,44 +338,58 @@ def get_custom_fields_supertypes(custom_fields):
     super_fields = {}
     for fields in custom_fields.values():
         for field in fields:
-            super_field = super_fields.get(field['id'], {"id": field["id"],
-                                                         "kind": field.get("kind"),
-                                                         "dataTypes": set(),
-                                                         "type": field["type"],
-                                                         "group": field["group"]})
+            super_field = super_fields.get(
+                field['id'],
+                {
+                    "id": field["id"],
+                    "kind": field.get("kind"),
+                    "dataTypes": set(),
+                    "type": field["type"],
+                    "group": field["group"],
+                },
+            )
             super_field['dataTypes'].add(field['dataType'])
             super_fields[field['id']] = super_field
     return list(super_fields.values())
 
-def generate_catalog_entry(client, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids):
+
+def generate_catalog_entry(
+    client, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids
+):
     schema = generate_base_schema()
     mdata = generate_base_metadata(all_cubes, schema)
 
     for standard_field in standard_fields:
-        if (standard_field['status'] == 'DEPRECATED'
-                or standard_field['id'] in ["ga:metricXX", "ga:dimensionXX"]):
+        if standard_field['status'] == 'DEPRECATED' or standard_field['id'] in [
+            "ga:metricXX",
+            "ga:dimensionXX",
+        ]:
             continue
         if is_static_XX_field(standard_field["id"], cubes_lookup):
-            sub_schemas, sub_mdata = handle_static_XX_field(standard_field, cubes_lookup)
+            sub_schemas, sub_mdata = handle_static_XX_field(
+                standard_field, cubes_lookup
+            )
             schema["properties"].update(sub_schemas)
             for calculated_id, cubes in sub_mdata.items():
                 specific_field = {**standard_field, **{"id": calculated_id}}
                 mdata = write_metadata(mdata, specific_field, cubes)
         elif is_dynamic_XX_field(standard_field["id"], cubes_lookup):
-            sub_schemas, sub_mdata, dynamic_fields_support = handle_dynamic_XX_field(client,
-                                                                                     standard_field,
-                                                                                     cubes_lookup,
-                                                                                     profile_ids)
+            sub_schemas, sub_mdata, dynamic_fields_support = handle_dynamic_XX_field(
+                client, standard_field, cubes_lookup, profile_ids
+            )
             schema["properties"].update(sub_schemas)
             for calculated_id, cubes in sub_mdata.items():
                 specific_field = {**standard_field, **{"id": calculated_id}}
-                mdata = write_metadata(mdata, specific_field, cubes, dynamic_fields_support)
+                mdata = write_metadata(
+                    mdata, specific_field, cubes, dynamic_fields_support
+                )
         else:
-            schema["properties"][standard_field["id"]] = type_to_schema(standard_field["dataType"],
-                                                                        standard_field["id"])
-            mdata = write_metadata(mdata,
-                                   standard_field,
-                                   cubes_lookup[standard_field["id"]])
+            schema["properties"][standard_field["id"]] = type_to_schema(
+                standard_field["dataType"], standard_field["id"]
+            )
+            mdata = write_metadata(
+                mdata, standard_field, cubes_lookup[standard_field["id"]]
+            )
 
     custom_fields_support = calculate_custom_fields_support(custom_fields)
     custom_super_fields = get_custom_fields_supertypes(custom_fields)
@@ -304,15 +399,19 @@ def generate_catalog_entry(client, standard_fields, custom_fields, all_cubes, cu
         elif custom_field["kind"] == 'analytics#customMetric':
             cubes_lookup_name = 'ga:metricXX'
         else:
-            raise Exception('Unknown custom field "kind": {}'.format(custom_field["kind"]))
+            raise Exception(
+                'Unknown custom field "kind": {}'.format(custom_field["kind"])
+            )
 
         cubes = cubes_lookup[cubes_lookup_name]
 
         mdata = write_metadata(mdata, custom_field, cubes, custom_fields_support)
-        schema["properties"][custom_field["id"]] = types_to_schema(custom_field["dataTypes"],
-                                                                   custom_field["id"])
+        schema["properties"][custom_field["id"]] = types_to_schema(
+            custom_field["dataTypes"], custom_field["id"]
+        )
 
     return schema, mdata
+
 
 def generate_premade_catalog_entry(standard_fields, all_cubes, cubes_lookup):
     schema = generate_base_schema()
@@ -320,14 +419,20 @@ def generate_premade_catalog_entry(standard_fields, all_cubes, cubes_lookup):
 
     for standard_field in standard_fields:
         # No dynamic fields in standard reports
-        if (standard_field['status'] == 'DEPRECATED'
-                or standard_field['id'] in ["ga:metricXX", "ga:dimensionXX"]):
+        if standard_field['status'] == 'DEPRECATED' or standard_field['id'] in [
+            "ga:metricXX",
+            "ga:dimensionXX",
+        ]:
             continue
 
-        schema["properties"][standard_field["id"]] = type_to_schema(standard_field["dataType"],
-                                                                    standard_field["id"])
-        mdata = write_metadata(mdata, standard_field, cubes_lookup[standard_field["id"]])
+        schema["properties"][standard_field["id"]] = type_to_schema(
+            standard_field["dataType"], standard_field["id"]
+        )
+        mdata = write_metadata(
+            mdata, standard_field, cubes_lookup[standard_field["id"]]
+        )
     return schema, mdata
+
 
 def generate_cubes_lookup(raw_cubes):
     """
@@ -341,6 +446,7 @@ def generate_cubes_lookup(raw_cubes):
                 cubes_lookup[field] = set()
             cubes_lookup[field].add(raw_cube)
     return cubes_lookup
+
 
 def parse_cube_definitions(client):
     """
@@ -356,20 +462,26 @@ def parse_cube_definitions(client):
     cubes_lookup = generate_cubes_lookup(raw_cubes)
     return all_cubes, cubes_lookup
 
+
 def get_custom_metrics(client, profile_id):
     custom_metrics = client.get_custom_metrics_for_profile(profile_id)
     metrics_fields = {"id", "name", "kind", "active", "min_value", "max_value"}
     account_id = client.profile_lookup[profile_id]["account_id"]
     web_property_id = client.profile_lookup[profile_id]["web_property_id"]
     profiles = client.get_profiles_for_property(account_id, web_property_id)
-    return  [{"account_id": account_id,
-              "web_property_id": web_property_id,
-              "profiles": profiles,
-              "type": "METRIC",
-              "dataType": item["type"],
-              "group": "Custom Variables or Columns",
-              **{k:v for k,v in item.items() if k in metrics_fields}}
-             for item in custom_metrics['items']]
+    return [
+        {
+            "account_id": account_id,
+            "web_property_id": web_property_id,
+            "profiles": profiles,
+            "type": "METRIC",
+            "dataType": item["type"],
+            "group": "Custom Variables or Columns",
+            **{k: v for k, v in item.items() if k in metrics_fields},
+        }
+        for item in custom_metrics['items']
+    ]
+
 
 def get_custom_dimensions(client, profile_id):
     custom_dimensions = client.get_custom_dimensions_for_profile(profile_id)
@@ -377,14 +489,19 @@ def get_custom_dimensions(client, profile_id):
     account_id = client.profile_lookup[profile_id]["account_id"]
     web_property_id = client.profile_lookup[profile_id]["web_property_id"]
     profiles = client.get_profiles_for_property(account_id, web_property_id)
-    return [{"dataType": "STRING",
-             "account_id": account_id,
-             "web_property_id": web_property_id,
-             "profiles": profiles,
-             "type": "DIMENSION",
-             "group": "Custom Variables or Columns",
-             **{k:v for k,v in item.items() if k in dimensions_fields}}
-            for item in custom_dimensions['items']]
+    return [
+        {
+            "dataType": "STRING",
+            "account_id": account_id,
+            "web_property_id": web_property_id,
+            "profiles": profiles,
+            "type": "DIMENSION",
+            "group": "Custom Variables or Columns",
+            **{k: v for k, v in item.items() if k in dimensions_fields},
+        }
+        for item in custom_dimensions['items']
+    ]
+
 
 def get_custom_fields(client, profile_id):
     custom_metrics_and_dimensions = []
@@ -394,62 +511,93 @@ def get_custom_fields(client, profile_id):
 
 
 def transform_field(field):
-    interesting_attributes = {k: v for k, v in field["attributes"].items()
-                              if k in {"dataType", "group", "status", "type"}}
-    return {"id": field["id"], "name": field["attributes"]["uiName"], **interesting_attributes}
+    interesting_attributes = {
+        k: v
+        for k, v in field["attributes"].items()
+        if k in {"dataType", "group", "status", "type"}
+    }
+    return {
+        "id": field["id"],
+        "name": field["attributes"]["uiName"],
+        **interesting_attributes,
+    }
+
 
 def get_standard_fields(client):
     metadata_response = client.get_field_metadata()
     # NB: These fields' specific names aren't discoverable, we think
     #     "customVar*" is deprecated and "calcMetric" is beta.
-    unsupported_fields = {"ga:customVarValueXX", "ga:customVarNameXX", "ga:calcMetric_<NAME>"}
-    return [transform_field(f) for f in metadata_response["items"] if f["id"] not in unsupported_fields]
+    unsupported_fields = {
+        "ga:customVarValueXX",
+        "ga:customVarNameXX",
+        "ga:calcMetric_<NAME>",
+    }
+    return [
+        transform_field(f)
+        for f in metadata_response["items"]
+        if f["id"] not in unsupported_fields
+    ]
 
-def generate_catalog(client, report_config, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids):
+
+def generate_catalog(
+    client,
+    report_config,
+    standard_fields,
+    custom_fields,
+    all_cubes,
+    cubes_lookup,
+    profile_ids,
+):
     """
     Generate a catalog entry for each report specified in `report_config`
     """
     catalog_entries = []
-    for report in PREMADE_REPORTS:
-        metrics_dimensions = set(report['metrics'] + report['dimensions'])
-        selected_by_default = {*report['metrics'][:10], # Use first 10 metrics in definition
-                               *report.get('default_dimensions', [])}
-        premade_fields = [field for field in standard_fields if field['id'] in metrics_dimensions]
-        schema, mdata = generate_premade_catalog_entry(premade_fields,
-                                                       all_cubes,
-                                                       cubes_lookup)
-
-        mdata = reduce(lambda mdata, field_name: metadata.write(mdata,
-                                                                ("properties", field_name),
-                                                                "selected-by-default", True),
-                       selected_by_default,
-                       mdata)
-
-        catalog_entries.append(CatalogEntry(schema=Schema.from_dict(schema),
-                                            key_properties=['_sdc_record_hash'],
-                                            stream=report['name'],
-                                            tap_stream_id=report['name'],
-                                            metadata=metadata.to_list(mdata)))
 
     for report in report_config:
-        schema, mdata = generate_catalog_entry(client,
-                                               standard_fields,
-                                               custom_fields,
-                                               all_cubes,
-                                               cubes_lookup,
-                                               profile_ids)
+        schema, mdata = generate_catalog_entry(
+            client, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids
+        )
 
-        catalog_entries.append(CatalogEntry(schema=Schema.from_dict(schema),
-                                            key_properties=['_sdc_record_hash'],
-                                            stream=report['name'],
-                                            tap_stream_id=report['id'],
-                                            metadata=metadata.to_list(mdata)))
+        catalog_entries.append(
+            CatalogEntry(
+                schema=Schema.from_dict(schema),
+                key_properties=['_sdc_record_hash'],
+                stream=report['name'],
+                tap_stream_id=report['name'],
+                metadata=metadata.to_list(mdata),
+            )
+        )
     return Catalog(catalog_entries)
+
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
 
 def discover(client, config, profile_ids):
     # Draw from spike to discover all the things
     # Get field_infos (standard and custom)
-    report_config = config.get("report_definitions") or []
+    default_reports = Path(__file__).parent.joinpath(
+        'defaults', 'default_report_definition.json'
+    )
+    report_def_file = config.get("reports", default_reports)
+    LOGGER.info(report_def_file)
+    if Path(report_def_file).is_file():
+        try:
+            report_config = load_json(report_def_file)
+        except ValueError:
+            LOGGER.critical(
+                "tap-google-analytics: The JSON definition in '{}' has errors".format(
+                    report_def_file
+                )
+            )
+            sys.exit(1)
+    else:
+        LOGGER.critical(
+            "tap-google-analytics: '{}' file not found".format(report_def_file)
+        )
+        sys.exit(1)
     LOGGER.info("Discovering standard fields...")
     standard_fields = get_standard_fields(client)
     LOGGER.info("Discovering custom fields...")
@@ -459,4 +607,13 @@ def discover(client, config, profile_ids):
     LOGGER.info("Parsing cube definitions...")
     all_cubes, cubes_lookup = parse_cube_definitions(client)
     LOGGER.info("Generating catalog...")
-    return generate_catalog(client, report_config, standard_fields, custom_fields, all_cubes, cubes_lookup, profile_ids)
+    return generate_catalog(
+        client,
+        report_config,
+        standard_fields,
+        custom_fields,
+        all_cubes,
+        cubes_lookup,
+        profile_ids,
+    )
+

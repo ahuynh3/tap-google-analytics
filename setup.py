@@ -27,8 +27,9 @@ setup(
     tap-google-analytics=tap_google_analytics:main
     """,
     packages=["tap_google_analytics"],
-    package_data = {
-        "tap_google_analytics": ["tap_google_analytics/ga_cubes.json"]
+    package_data={
+        "tap_google_analytics": ["tap_google_analytics/ga_cubes.json"],
+        "tap_google_analytics/defaults": ["tap_google_analytics/defaults/default_report_definition.json"]
     },
     include_package_data=True,
 )
