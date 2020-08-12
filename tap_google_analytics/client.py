@@ -13,12 +13,45 @@ import backoff
 
 LOGGER = singer.get_logger()
 
+def is_retryable_403(response):
+    """
+    The Google Analytics Management API and Metadata API define three types of 403s that are retryable due to quota limits.
+    Docs:
+    https://developers.google.com/analytics/devguides/config/mgmt/v3/errors
+    https://developers.google.com/analytics/devguides/reporting/metadata/v3/errors
+    """
+    retryable_errors = {"userRateLimitExceeded", "rateLimitExceeded", "quotaExceeded"}
+    error_reasons = {error.get('reason') for error in response.json().get('error', {}).get('errors',[])}
+
+    if any(error_reasons.intersection(retryable_errors)):
+        return True
+
+    return False
+
 def should_giveup(e):
-    if e.response.status_code == 429:
-        error_message = e.response.json().get("error", {}).get("message")
+    """
+    Note: Due to `backoff` expecting a `giveup` parameter, this function returns:
+    True - if the exception is NOT retryable
+    False - if the exception IS retryable
+    """
+    response = e.response
+    if not _is_json(response):
+        # All of our retryable errors require a JSON response body
+        return False
+
+    do_retry = should_retry(response)
+
+    if do_retry:
+        error_message = response.json().get("error", {}).get("message")
         if error_message:
-            LOGGER.info("Encountered 429, backing off exponentially. Details: %s", error_message)
-    return not e.response.status_code == 429
+            LOGGER.info("Encountered retryable %s, backing off exponentially. Details: %s",
+                        response.status_code,
+                        error_message)
+
+    return not do_retry
+
+def should_retry(response):
+    return response.status_code == 429 or is_retryable_403(response)
 
 def _is_json(response):
     try:
@@ -104,11 +137,15 @@ class Client():
         self.expires_in = token_json['expires_in']
 
 
+    # For fewer requests, and reliability. This backoff tries less hard.
+    # Backoff Max Time: try 1 (wait 10) 2 (wait 100) 3 (wait 1000) 4
+    # Gives us waits of: (10 * 10 ^ 0), (10 * 10 ^ 1), (10 * 10 ^ 2)
     @backoff.on_exception(backoff.expo,
                           (requests.exceptions.RequestException),
-                          max_tries=10,
+                          max_tries=4,
+                          base=10,
                           giveup=should_giveup,
-                          factor=4,
+                          factor=10,
                           jitter=None)
     def _make_request(self, method, url, params=None, data=None):
         params = params or {}
@@ -126,10 +163,10 @@ class Client():
             response = self.session.request(method, url, headers=headers, params=params)
 
         error_message = _is_json(response) and response.json().get("error", {}).get("message")
-        if error_message:
-            raise Exception(f"{response.status_code} Client Error: {error_message}")
-        
-        # response.raise_for_status()
+        if 400 <= response.status_code < 500 and error_message and not should_retry(response):
+            raise Exception("{} Client Error, error message: {}".format(response.status_code, error_message))
+
+        response.raise_for_status()
 
         return response
 
@@ -206,7 +243,6 @@ class Client():
     def get_custom_metrics(self, account_id, web_property_id):
         """
         Gets all metrics for the specified web_property_id.
-
         """
         metrics_url = 'https://www.googleapis.com/analytics/v3/management/accounts/{accountId}/webproperties/{webPropertyId}/customMetrics'
 
@@ -242,7 +278,6 @@ class Client():
         - report_date - the day to retrieve data for, as a Python datetime object, to limit report data
         - metrics - list of metrics, of the form ["ga:metric1", "ga:metric2", ...]
         - dimensions - list of dimensions, of the form ["ga:dim1", "ga:dim2", ...]
-
         Returns:
         - A generator of a sequence of reports w/ associated metadata (metrics/dims/report_date/profile)
         """
